@@ -11,6 +11,22 @@
 7. [Testing the Pipeline](#testing-the-pipeline)
 8. [Troubleshooting](#troubleshooting)
 
+## Why taskdef.json is Required
+
+In ECS blue-green deployments with CodeDeploy, there are actually **two different task definition formats**:
+
+1. **ECS Console Format** - Used when creating task definitions manually in the AWS Console
+2. **CodeDeploy Format (taskdef.json)** - Used by CodeDeploy for blue-green deployments
+
+The `taskdef.json` file is specifically required because:
+
+- **CodeDeploy needs to create new task definition revisions** during blue-green deployment
+- **It must be in a specific JSON format** that CodeDeploy can parse and modify
+- **The `<IMAGE1_URI>` placeholder** gets replaced by CodeDeploy with the new image URI
+- **Different from imagedefinitions.json** - that's only for standard ECS deployments
+
+Without `taskdef.json`, CodeDeploy cannot perform the blue-green deployment because it doesn't know how to create the new task definition revision with the updated container image.
+
 ---
 
 ## Overview
@@ -84,7 +100,8 @@ todo-microservice/
 ├── Dockerfile
 ├── pom.xml
 ├── buildspec.yml
-└── appspec.yml
+├── appspec.yml
+└── taskdef.json
 ```
 
 ### Step 2: Create Maven Configuration (pom.xml)
@@ -374,13 +391,58 @@ phases:
       - docker push $REPOSITORY_URI:latest
       - echo Writing image definitions file...
       - printf '[{"name":"todo-app","imageUri":"%s"}]' $REPOSITORY_URI:$IMAGE_TAG > imagedefinitions.json
+      - echo Updating task definition with new image...
+      - sed -i 's|<IMAGE1_URI>|'$REPOSITORY_URI:$IMAGE_TAG'|g' taskdef.json
+      - sed -i 's|<AWS_ACCOUNT_ID>|'$AWS_ACCOUNT_ID'|g' taskdef.json
+      - sed -i 's|<AWS_DEFAULT_REGION>|'$AWS_DEFAULT_REGION'|g' taskdef.json
 artifacts:
   files:
     - imagedefinitions.json
     - appspec.yml
+    - taskdef.json
 ```
 
-### Step 6: Create CodeDeploy Configuration (appspec.yml)
+### Step 6: Create Task Definition Template (taskdef.json)
+
+```json
+{
+  "family": "todo-task-definition",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "todo-app",
+      "image": "<IMAGE1_URI>",
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/todo-task-definition",
+          "awslogs-region": "<AWS_DEFAULT_REGION>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "environment": [
+        {
+          "name": "SPRING_PROFILES_ACTIVE",
+          "value": "production"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Step 7: Create CodeDeploy Configuration (appspec.yml)
 
 ```yaml
 version: 0.0
@@ -395,7 +457,7 @@ Resources:
         PlatformVersion: "LATEST"
 ```
 
-### Step 7: Push to GitHub
+### Step 8: Push to GitHub
 
 1. Initialize Git repository:
 ```bash
@@ -434,6 +496,16 @@ git push -u origin main
 4. Set **Cluster name**: `todo-cluster`
 5. Leave VPC and subnets as default (or choose your preferred VPC)
 6. Click **Create**
+
+### Step 2: Create CloudWatch Log Group
+
+Before creating the task definition, we need to create a CloudWatch log group:
+
+1. Go to **CloudWatch** in AWS Console
+2. Click **Logs** → **Log groups**
+3. Click **Create log group**
+4. Set **Log group name**: `/ecs/todo-task-definition`
+5. Click **Create**
 
 ### Step 3: Create Task Definition
 
